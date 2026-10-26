@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.pt
+*.pth
+VOCdevkit/
+VOC2012/
+run/
+.venv/
+data/*
+!data/README.md
+pretrained/*
+!pretrained/README.md

@@ -1,0 +1,8 @@
+torch>=2.4
+torchvision>=0.19
+numpy>=1.24,<3
+Pillow>=10
+matplotlib>=3.7
+fvcore==0.1.5.post20221221
+tqdm>=4.66,<5
+scipy>=1.10,<2
