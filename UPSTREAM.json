@@ -1,0 +1,12 @@
+{
+  "source_repository": "https://github.com/xuanpluspro/plant-seg-lab",
+  "source_commit": "049500a93d81fbf6021614a1c9d31264e210c917",
+  "source_branch": "main",
+  "ablation_protocol": "bimseg-three-module-v1",
+  "description": "Independent eight-configuration ablations; full model preserves upstream tensor names and operations.",
+  "disabled_modules": {
+    "MSCA": "identity",
+    "DRCF": "bilinear upsample + add + 1x1 Conv/BN/ReLU",
+    "DCAM": "2x2 average pool + add + 1x1 Conv/GN/ReLU"
+  }
+}
