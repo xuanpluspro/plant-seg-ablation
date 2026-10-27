@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader
 from model import OSSSeg
 from model.losses import SegmentationLoss
 from ablation_config import canonical_model_config, describe_ablation
+from utils.checkpoint_storage import inference_checkpoint
 from utils.dataloader_medical import PlantVOCDataset, voc_root, validate_splits
 from utils.train_and_eval import train_one_epoch, evaluate
 from utils.augmentation import AUGMENTATION_CONFIG
@@ -112,6 +113,9 @@ def train(args):
     start, best, history = 0, -1., []
     if args.resume:
         checkpoint = read_checkpoint(args.resume)
+        missing = [key for key in ("optimizer", "scheduler", "scaler", "rng", "history") if key not in checkpoint]
+        if missing:
+            raise ValueError("This checkpoint is inference-only; resume training from last.pth")
         saved_data = checkpoint.get("data_config", dict(num_classes=2, mask_encoding="binary255"))
         saved_config = canonical_model_config(checkpoint["model_config"])
         if (saved_data != data_config or saved_config != model_config
@@ -158,7 +162,7 @@ def train(args):
             scheduler=scheduler.state_dict(), scaler=scaler.state_dict(),
             rng=rng_state(generator), history=history)
         if improved:
-            save_checkpoint(checkpoint, output / "best.pth")
+            save_checkpoint(inference_checkpoint(checkpoint), output / "best.pth")
         save_checkpoint(checkpoint, output / "last.pth")
         (output / "history.json").write_text(json.dumps(history, indent=2, allow_nan=False), encoding="utf-8")
         with (output / "history.csv").open("w", newline="", encoding="utf-8-sig") as stream:

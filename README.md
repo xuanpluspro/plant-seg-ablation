@@ -188,3 +188,15 @@ python -m unittest discover -s tests -v
 模型测试使用真实 ResNet50：八种配置 × 二/四/六分类的 CPU 前向和反向、开关对应的模块类型、各配置 checkpoint 重载，以及 full 与固定源版本的参数键/初始化权重/输出逐元素比较。另有批量运行、续跑、失败记录和逐类汇总测试。源模型参考只用于测试，位于 `tests/upstream_ossseg_reference.py`，不参与生产模型构建。
 
 CPU 合成检查验证工程与数值链路，不证明真实数据精度、CUDA/AMP 完整训练稳定性或 batch=32 的显存容量。原始模块文献与许可证见 model 的 SOURCE 文档、LICENSE.MSCN 和 model/LICENSE.MODA。
+
+## 10. 精简 best.pth
+
+新训练的 best.pth 仅保存模型权重及构建、评价所需元数据，不再保存 optimizer、scheduler、scaler、rng 和 history。FP32 模型张量不变；完整模型约 151 MiB（约 158 MB），不同消融组随参数量变化。last.pth 仍保存完整训练状态，只能用 last.pth 断点恢复。训练历史另存 history.csv/json。
+
+旧检查点可单独导出，不重新训练、不修改原文件：
+
+```bash
+python slim_checkpoint.py --weights run/train/你的实验/best.pth --output run/train/你的实验/best_inference.pth
+```
+
+导出的文件继续支持本仓库预测和评价脚本；不支持断点恢复。仅精简 best.pth 不会减少仍保留的 last.pth 体积。
