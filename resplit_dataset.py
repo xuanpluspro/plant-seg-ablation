@@ -1,7 +1,7 @@
 """Rebuild VOC split TXT files with deterministic class/area stratification.
 No torch required. Defaults: GWFSS, train/val/test=70/10/20, seed=42.
 Uses only IDs in the existing manifests; never adds unlisted images.
-Exact decoded-image duplicates stop the operation for manual review.
+Exact decoded-image duplicates are retained and assigned to the same split.
 Same-source/near-duplicate grouping requires acquisition metadata and is NOT inferred.
 """
 import argparse
@@ -53,7 +53,7 @@ def inspect(root, ids, classes):
             if p.stem in images:
                 raise ValueError(f"Ambiguous image stem: {p.stem}")
             images[p.stem] = p
-    counts, hashes, seen = [], [], {}
+    counts, hashes, seen, mask_hashes = [], [], {}, []
     for i, name in enumerate(ids):
         if name not in images:
             raise ValueError(f"Missing image: {name}")
@@ -67,15 +67,15 @@ def inspect(root, ids, classes):
         if not np.isin(mask, np.arange(classes)).all():
             raise ValueError(f"Expected indexed mask 0..{classes-1}: {name}")
         digest = hashlib.sha256(str(rgb.shape).encode() + rgb.tobytes()).hexdigest()
-        if digest in seen:
-            raise ValueError(f"Duplicate decoded image: {seen[digest]} and {name}; "
-                             "group/deduplicate explicitly before splitting")
-        seen[digest] = name
+        seen.setdefault(digest, []).append(i)
+        mask_hashes.append(hashlib.sha256(mask.tobytes()).hexdigest())
         hashes.append(hashlib.sha256((digest + hashlib.sha256(mask.tobytes()).hexdigest()).encode()).hexdigest())
         counts.append(np.bincount(mask.ravel(), minlength=classes))
         if (i + 1) % 200 == 0:
             print(f"Audited {i+1}/{len(ids)}", flush=True)
-    return np.asarray(counts), hashes
+    groups = [np.asarray(rows, dtype=int) for rows in seen.values()]
+    conflicts = [rows.tolist() for rows in groups if len({mask_hashes[i] for i in rows}) > 1]
+    return np.asarray(counts), hashes, groups, conflicts
 
 
 def features(counts):
@@ -104,7 +104,7 @@ def features(counts):
     return np.stack(columns, axis=1), np.asarray(weights), names
 
 
-def assign(x, weights, ratios, seed):
+def assign(x, weights, ratios, seed, groups=None):
     n = len(x)
     sizes = np.floor(n * ratios).astype(int)
     for s in np.argsort(-(n * ratios - sizes), kind="stable")[:n-sizes.sum()]:
@@ -117,31 +117,52 @@ def assign(x, weights, ratios, seed):
     scale = np.maximum(target, 1.)
     def score(actual):
         return float((((actual-target)/scale)**2 * weights).sum())
-    # Multiple seeded random candidates, followed by fixed-size pair swaps.
+    if groups is None:
+        groups = [[i] for i in range(n)]
+    groups = [np.asarray(g, dtype=int) for g in groups]
+    gx = np.stack([x[g].sum(0) for g in groups])
+    gs = np.asarray([len(g) for g in groups])
     best, best_score = None, float("inf")
+    # Place largest duplicate groups first, then fill with singletons.
     for _ in range(64):
-        order = rng.permutation(n)
-        a = np.empty(n, dtype=int)
-        a[order] = np.repeat(np.arange(3), sizes)
-        actual = np.stack([x[a == s].sum(0) for s in range(3)])
-        value = score(actual)
-        if value < best_score:
-            best, best_score = a.copy(), value
+        order = rng.permutation(len(groups))
+        order = order[np.argsort(-gs[order], kind="stable")]
+        remaining = sizes.copy()
+        a = np.empty(len(groups), dtype=int)
+        for i in order:
+            feasible = np.flatnonzero(remaining >= gs[i])
+            if not len(feasible):
+                break
+            probabilities = remaining[feasible].astype(float)
+            s = rng.choice(feasible, p=probabilities/probabilities.sum())
+            a[i] = s
+            remaining[s] -= gs[i]
+        else:
+            actual = np.stack([gx[a == s].sum(0) for s in range(3)])
+            value = score(actual)
+            if value < best_score:
+                best, best_score = a.copy(), value
+    if best is None:
+        raise ValueError("Cannot fit duplicate groups into exact split sizes; "
+                         "try a different split seed or ratios. No TXT files changed.")
     a = best
-    actual = np.stack([x[a == s].sum(0) for s in range(3)])
+    actual = np.stack([gx[a == s].sum(0) for s in range(3)])
     for _ in range(max(20000, n * 100)):
-        i, j = rng.integers(n, size=2)
+        i, j = rng.integers(len(groups), size=2)
         u, v = a[i], a[j]
-        if u == v:
+        if u == v or gs[i] != gs[j]:
             continue
-        delta = x[j] - x[i]
+        delta = gx[j] - gx[i]
         candidate = actual.copy()
         candidate[u] += delta; candidate[v] -= delta
         value = score(candidate)
         if value < best_score - 1e-12:
             actual, best_score = candidate, value
             a[i], a[j] = v, u
-    return a, sizes, actual
+    sample_assignment = np.empty(n, dtype=int)
+    for group, split in zip(groups, a):
+        sample_assignment[group] = split
+    return sample_assignment, sizes, actual
 
 
 def main():
@@ -159,19 +180,23 @@ def main():
         p.error("Three positive finite ratios must sum to 1")
     old, paths = read_lists(root)
     ids = sorted(sum(old.values(), []))
-    counts, hashes = inspect(root, ids, args.num_classes)
+    counts, hashes, groups, conflicts = inspect(root, ids, args.num_classes)
     x, weights, names = features(counts)
-    assignment, sizes, actual = assign(x, weights, ratios, args.seed)
+    assignment, sizes, actual = assign(x, weights, ratios, args.seed, groups)
     new = {s: [name for i, name in enumerate(ids) if assignment[i] == k]
            for k, s in enumerate(SPLITS)}
     for k, s in enumerate(SPLITS):
         if not (counts[assignment == k, 1:].sum(0) > 0).all():
             raise ValueError(f"Missing foreground class in {s}")
-    report = dict(strategy="class_presence_relative_area_stratified_v1", seed=args.seed,
+    report = dict(strategy="class_presence_relative_area_grouped_v2", seed=args.seed,
                   ratios=dict(zip(SPLITS, ratios.tolist())), classes=args.num_classes,
                   old_counts={s:len(old[s]) for s in SPLITS},
                   new_counts={s:len(new[s]) for s in SPLITS},
                   inventory_sha256=hashlib.sha256("\n".join(n+":"+h for n,h in zip(ids,hashes)).encode()).hexdigest(),
+                  duplicate_image_groups=[[ids[i] for i in g] for g in groups if len(g) > 1],
+                  differing_mask_groups=[[ids[i] for i in g] for g in conflicts],
+                  background_only_count=int((counts[:, 1:].sum(1) == 0).sum()),
+                  background_only_by_split={s:int(((counts[:, 1:].sum(1) == 0) & (assignment == k)).sum()) for k,s in enumerate(SPLITS)},
                   features=names,
                   feature_counts={s:actual[k].tolist() for k,s in enumerate(SPLITS)},
                   class_pixels={s:counts[assignment == k].sum(0).tolist() for k,s in enumerate(SPLITS)},
